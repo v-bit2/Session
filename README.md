@@ -1,29 +1,36 @@
-# VOLTRA MD
+# VOLTRA MD — WhatsApp Pair Code Generator
 
-WhatsApp pair-code session generator.
+Built by **Drey**. Generates a custom WhatsApp Multi-Device pair code (`VOLTRAMD`) and automatically delivers the `creds.json` session file to the linked WhatsApp chat.
 
-**Developer:** Drey
+## Stack
+- Node.js ≥ 20
+- Express 4
+- **baileys** (latest renamed package — replaces the old `@whiskeysockets/baileys`)
+- pino, qrcode, awesome-phonenumber
 
 ## Setup
-
 ```bash
 npm install
 npm start
 ```
+Server listens on `http://localhost:8000`.
 
-Open http://localhost:8000
+## Pair flow
+1. Open the site.
+2. Enter your full international number (e.g. `2348012345678`, no `+`).
+3. Click **Generate Pair Code** — server returns `VOLT-RAMD`.
+4. WhatsApp → Settings → Linked Devices → Link a device → **Link with phone number** → enter `VOLTRAMD`.
+5. On successful link, `creds.json` is sent automatically to your own chat.
 
-## Custom Pair Code
+## Notes
+- The `baileys` package (no scope) is the **maintained** fork. The old `@whiskeysockets/baileys` is outdated and pair codes frequently fail to link with current WhatsApp.
+- The custom code must be 8 chars, `A–Z` / `0–9` only.
+- Deploy on a persistent Node host (Render, Railway, Fly.io, VPS). Not for serverless.
 
-The pairing code is hardcoded to **VOLTRAMD** (8 chars). Edit `CUSTOM_PAIR_CODE` in `pair.js` to change it. WhatsApp requires exactly 8 characters, A–Z / 0–9 only.
+## Custom pair code
+Edit `pair.js`:
+```js
+const CUSTOM_PAIR_CODE = 'VOLTRAMD';
+```
 
-## How it works
-
-1. User enters WhatsApp number with country code.
-2. Server requests a pairing code from WhatsApp via Baileys.
-3. User enters `VOLTRA-MD` in WhatsApp → Linked Devices → Link with phone number.
-4. On successful link, the `creds.json` session file is sent to the user's own WhatsApp chat automatically. No download button on the site.
-
-## Deployment
-
-Requires a persistent Node.js host (Render, Railway, Fly.io, VPS). Will NOT work on Cloudflare Workers / Vercel serverless because Baileys needs a long-lived WebSocket.
+© 2025 Drey · VOLTRA MD

@@ -1,12 +1,21 @@
 import express from 'express';
 import fs from 'fs';
 import pino from 'pino';
-import { makeWASocket, useMultiFileAuthState, delay, makeCacheableSignalKeyStore, Browsers, jidNormalizedUser, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
+import {
+    default as makeWASocket,
+    useMultiFileAuthState,
+    delay,
+    makeCacheableSignalKeyStore,
+    Browsers,
+    jidNormalizedUser,
+    fetchLatestBaileysVersion,
+    DisconnectReason,
+} from 'baileys';
 import pn from 'awesome-phonenumber';
 
 const router = express.Router();
 
-// Custom pairing code (must be 8 chars, A-Z / 0-9)
+// Custom 8-character pairing code (A-Z / 0-9 only)
 const CUSTOM_PAIR_CODE = 'VOLTRAMD';
 
 function removeFile(FilePath) {
@@ -20,118 +29,125 @@ function removeFile(FilePath) {
 
 router.get('/', async (req, res) => {
     let num = req.query.number;
-    let dirs = './' + (num || `session`);
+    if (!num) {
+        return res.status(400).send({ code: 'Missing number parameter.' });
+    }
 
-    await removeFile(dirs);
+    const sessionId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const dirs = `./sessions/${sessionId}`;
+    if (!fs.existsSync('./sessions')) fs.mkdirSync('./sessions', { recursive: true });
 
     num = num.replace(/[^0-9]/g, '');
-
     const phone = pn('+' + num);
-    if (!phone.isValid()) {
+    if (!phone.valid) {
         if (!res.headersSent) {
-            return res.status(400).send({ code: 'Invalid phone number. Please enter your full international number (e.g., 15551234567) without + or spaces.' });
+            return res.status(400).send({
+                code: 'Invalid phone number. Use full international format (e.g. 15551234567).',
+            });
         }
         return;
     }
-    num = phone.getNumber('e164').replace('+', '');
+    num = phone.number.e164.replace('+', '');
 
     async function initiateSession() {
         const { state, saveCreds } = await useMultiFileAuthState(dirs);
+        const logger = pino({ level: 'fatal' }).child({ level: 'fatal' });
 
         try {
             const { version } = await fetchLatestBaileysVersion();
-            let VoltraBot = makeWASocket({
+            const VoltraBot = makeWASocket({
                 version,
                 auth: {
                     creds: state.creds,
-                    keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }).child({ level: "fatal" })),
+                    keys: makeCacheableSignalKeyStore(state.keys, logger),
                 },
-                printQRInTerminal: false,
-                logger: pino({ level: "fatal" }).child({ level: "fatal" }),
-                browser: Browsers.windows('Chrome'),
+                logger,
+                // Browser MUST be a "compatible" desktop string for pair codes to link.
+                browser: Browsers.macOS('Safari'),
                 markOnlineOnConnect: false,
                 generateHighQualityLinkPreview: false,
-                defaultQueryTimeoutMs: 60000,
-                connectTimeoutMs: 60000,
-                keepAliveIntervalMs: 30000,
-                retryRequestDelayMs: 250,
-                maxRetries: 5,
+                syncFullHistory: false,
+                defaultQueryTimeoutMs: 60_000,
+                connectTimeoutMs: 60_000,
+                keepAliveIntervalMs: 25_000,
+                retryRequestDelayMs: 350,
             });
 
+            VoltraBot.ev.on('creds.update', saveCreds);
+
             VoltraBot.ev.on('connection.update', async (update) => {
-                const { connection, lastDisconnect, isNewLogin, isOnline } = update;
+                const { connection, lastDisconnect } = update;
 
                 if (connection === 'open') {
-                    console.log("✅ Connected successfully!");
-                    console.log("📱 Sending session file to user...");
+                    console.log('✅ Linked successfully — sending creds.json');
+                    // give WA a moment to fully establish the session before sending
+                    await delay(4000);
 
                     try {
                         const sessionVoltra = fs.readFileSync(dirs + '/creds.json');
-
                         const userJid = jidNormalizedUser(num + '@s.whatsapp.net');
+
                         await VoltraBot.sendMessage(userJid, {
                             document: sessionVoltra,
                             mimetype: 'application/json',
-                            fileName: 'creds.json'
+                            fileName: 'creds.json',
                         });
-                        console.log("📄 Session file sent successfully");
 
                         await VoltraBot.sendMessage(userJid, {
-                            text: `⚠️ Do not share this file with anybody ⚠️\n\n┌┤✑  Thanks for using *VOLTRA MD*\n│└────────────┈ ⳹\n│© 2025 Drey · VOLTRA MD\n└─────────────────┈ ⳹\n`
+                            text:
+                                `⚠️ Do not share this file with anybody ⚠️\n\n` +
+                                `┌┤✑  Thanks for using *VOLTRA MD*\n` +
+                                `│└────────────┈ ⳹\n` +
+                                `│© 2025 Drey · VOLTRA MD\n` +
+                                `└─────────────────┈ ⳹\n`,
                         });
-                        console.log("⚠️ Warning message sent successfully");
 
-                        console.log("🧹 Cleaning up session...");
-                        await delay(1000);
-                        removeFile(dirs);
-                        console.log("✅ Session cleaned up successfully");
+                        console.log('📄 creds.json delivered');
+                        await delay(1500);
+                        await VoltraBot.ws.close();
                     } catch (error) {
-                        console.error("❌ Error sending messages:", error);
+                        console.error('❌ Error sending session:', error);
+                    } finally {
                         removeFile(dirs);
                     }
                 }
 
-                if (isNewLogin) {
-                    console.log("🔐 New login via pair code");
-                }
-
-                if (isOnline) {
-                    console.log("📶 Client is online");
-                }
-
                 if (connection === 'close') {
                     const statusCode = lastDisconnect?.error?.output?.statusCode;
-                    if (statusCode === 401) {
-                        console.log("❌ Logged out from WhatsApp. Need to generate new pair code.");
-                    } else {
-                        console.log("🔁 Connection closed — restarting...");
+                    if (
+                        statusCode === DisconnectReason.loggedOut ||
+                        statusCode === 401 ||
+                        statusCode === DisconnectReason.connectionReplaced
+                    ) {
+                        console.log('❌ Logged out / replaced — cleanup');
+                        removeFile(dirs);
+                    } else if (statusCode === DisconnectReason.restartRequired) {
+                        console.log('🔁 Restart required — reconnecting');
                         initiateSession();
+                    } else {
+                        console.log('🔁 Connection closed (' + statusCode + ')');
                     }
                 }
             });
 
             if (!VoltraBot.authState.creds.registered) {
-                await delay(3000);
-                num = num.replace(/[^\d+]/g, '');
-                if (num.startsWith('+')) num = num.substring(1);
-
+                await delay(1500);
                 try {
-                    // Pass custom 8-char pairing code (VOLTRAMD)
                     let code = await VoltraBot.requestPairingCode(num, CUSTOM_PAIR_CODE);
                     code = code?.match(/.{1,4}/g)?.join('-') || code;
+                    console.log({ num, code });
                     if (!res.headersSent) {
-                        console.log({ num, code });
-                        await res.send({ code });
+                        res.send({ code });
                     }
                 } catch (error) {
                     console.error('Error requesting pairing code:', error);
                     if (!res.headersSent) {
-                        res.status(503).send({ code: 'Failed to get pairing code. Please check your phone number and try again.' });
+                        res.status(503).send({
+                            code: 'Failed to get pairing code. Check the number and try again.',
+                        });
                     }
                 }
             }
-
-            VoltraBot.ev.on('creds.update', saveCreds);
         } catch (err) {
             console.error('Error initializing session:', err);
             if (!res.headersSent) {
@@ -144,19 +160,20 @@ router.get('/', async (req, res) => {
 });
 
 process.on('uncaughtException', (err) => {
-    let e = String(err);
-    if (e.includes("conflict")) return;
-    if (e.includes("not-authorized")) return;
-    if (e.includes("Socket connection timeout")) return;
-    if (e.includes("rate-overlimit")) return;
-    if (e.includes("Connection Closed")) return;
-    if (e.includes("Timed Out")) return;
-    if (e.includes("Value not found")) return;
-    if (e.includes("Stream Errored")) return;
-    if (e.includes("Stream Errored (restart required)")) return;
-    if (e.includes("statusCode: 515")) return;
-    if (e.includes("statusCode: 503")) return;
-    console.log('Caught exception: ', err);
+    const e = String(err);
+    if (
+        e.includes('conflict') ||
+        e.includes('not-authorized') ||
+        e.includes('Socket connection timeout') ||
+        e.includes('rate-overlimit') ||
+        e.includes('Connection Closed') ||
+        e.includes('Timed Out') ||
+        e.includes('Value not found') ||
+        e.includes('Stream Errored') ||
+        e.includes('statusCode: 515') ||
+        e.includes('statusCode: 503')
+    ) return;
+    console.log('Caught exception:', err);
 });
 
 export default router;
